@@ -1,0 +1,294 @@
+---
+title: "SARS-CoV-2 vs Influenza: multistate models"
+author: "Patrick G. Lyons, MD, MSc"
+output: html_document
+date: "2022-08-26"
+---
+
+This script performs multistate modeling on supplemental oxygen requirements in SARS-CoV-2 and influenza patients.
+
+# Load libraries
+```{r libraries, include = F}
+library(doParallel)
+library(data.table)
+library(ggalluvial)
+library(patchwork)
+library(tidyverse)
+library(tidytable)
+library(survival)
+library(janitor)
+library(mstate)
+library(here)
+```
+
+# Load cleaned data
+```{r load data}
+df <- fread(here("covflu_combined_deidentified.csv"))
+
+# create hospital day variable
+df <-
+  df |>
+  mutate.(
+    hospital_day = floor(hours_12/24)
+  )
+```
+
+# Find max O2 requirements by 12 hour time window
+```{r, warning = FALSE}
+df <- 
+  df |>
+  mutate.(
+    o2 = case_when.(
+      max_o2_12h == "Admission" ~ 0,
+      max_o2_12h == "Room Air"  ~ 1,
+      max_o2_12h == "1-6 LPM"   ~ 2,
+      max_o2_12h == "7-15 LPM"  ~ 3,
+      max_o2_12h == "HHFNC"     ~ 4,
+      max_o2_12h == "NIV"       ~ 5,
+      max_o2_12h == "IMV"       ~ 6,
+      TRUE                      ~ NA
+  )) |>
+  mutate.(
+    max_o2day = max(o2, na.rm = T), 
+    .by       = c(arb_enc, hospital_day)
+  )
+
+# take max O2 per day, create final outcomes
+df <- 
+  df |>
+  select.(arb_enc, dead_01, hospital_day, max_o2day, virus) |>
+  distinct.() |>
+  mutate.(max_days = max(hospital_day, na.rm = T), .by = arb_enc) |>
+  mutate.(
+    highest_o2 = case_when.(
+      max_o2day == 0 ~ "Admission",
+      max_o2day == 1 ~ "Room Air",
+      max_o2day == 2 ~ "1-6 LPM",
+      max_o2day == 3 ~ "7-15 LPM",
+      max_o2day == 4 ~ "HHFNC",
+      max_o2day == 5 ~ "NIV",
+      max_o2day == 6 ~ "IMV",
+      TRUE           ~ NA
+  )) |>
+  mutate.(
+    highest_o2 = case_when.(
+      hospital_day == max_days & dead_01 == 0 ~ "Discharged",
+      hospital_day == max_days & dead_01 == 1 ~ "Dead",
+      TRUE                                 ~ highest_o2
+  )) 
+
+# keep only days for alluvial
+df <- 
+  df |> 
+  select.(-max_o2day, -max_days) |>
+  filter.(hospital_day <= 28) |>
+  distinct.()
+
+# reshape wide
+df <- 
+  df |> 
+  mutate.(hospital_day = (paste0("day_", hospital_day))) |>
+  pivot_wider.(
+    names_from  = hospital_day,
+    values_from = highest_o2
+  ) 
+```
+
+# Print faceted alluvial plot for Days 1. 3, 7, 14, 21, 28.
+``` {r prep-28d-alluvial} 
+df <- 
+  df |>
+  mutate.(
+    day_1  = fifelse(is.na(day_1),  day_0,  day_1),
+    day_3  = fifelse(is.na(day_3),  day_1,  day_3),
+    day_4  = fifelse(is.na(day_4),  day_3,  day_4),
+    day_5  = fifelse(is.na(day_5),  day_4,  day_5),
+    day_6  = fifelse(is.na(day_6),  day_5,  day_6),
+    day_7  = fifelse(is.na(day_7),  day_6,  day_7),
+    day_8  = fifelse(is.na(day_8),  day_7,  day_8),
+    day_9  = fifelse(is.na(day_9),  day_8,  day_9),
+    day_10 = fifelse(is.na(day_10), day_9,  day_10),
+    day_11 = fifelse(is.na(day_11), day_10, day_11),
+    day_12 = fifelse(is.na(day_12), day_11, day_12),
+    day_13 = fifelse(is.na(day_13), day_12, day_13),
+    day_14 = fifelse(is.na(day_14), day_13, day_14),
+    day_15 = fifelse(is.na(day_15), day_14, day_15),
+    day_16 = fifelse(is.na(day_16), day_15, day_16),
+    day_17 = fifelse(is.na(day_17), day_16, day_17),
+    day_18 = fifelse(is.na(day_18), day_17, day_18),
+    day_19 = fifelse(is.na(day_19), day_18, day_19),
+    day_20 = fifelse(is.na(day_20), day_19, day_20),
+    day_21 = fifelse(is.na(day_21), day_20, day_21),
+    day_22 = fifelse(is.na(day_22), day_21, day_22),
+    day_23 = fifelse(is.na(day_23), day_22, day_23),
+    day_24 = fifelse(is.na(day_24), day_23, day_24),
+    day_25 = fifelse(is.na(day_25), day_24, day_25),
+    day_26 = fifelse(is.na(day_26), day_25, day_26),
+    day_27 = fifelse(is.na(day_27), day_26, day_27),
+    day_28 = fifelse(is.na(day_28), day_27, day_28)
+  ) |>
+  select.(
+    arb_enc,
+    virus,
+    day_1,
+    day_3,
+    day_7,
+    day_14,
+    day_21,
+    day_28
+  ) |>
+  pivot_longer.(
+    cols      = starts_with("day_"),
+    names_to  = "hospital_day",
+    values_to = "o2_support"
+  ) |>
+  fill.(
+    o2_support,
+    .by        = c(arb_enc, hospital_day),
+    .direction = "downup"
+  ) |>
+  distinct.()
+
+df_limits <- fread(here("covflu_combined_deidentified.csv")) |>
+  select.(arb_enc, los_hosp_hours)
+
+df <- 
+  df |> 
+  left_join.(
+    df_limits
+  ) |>
+  mutate.(
+    los      = floor(los_hosp_hours/24),
+    daycheck = as.integer(gsub("day_", "", hospital_day)),
+    problem  = case_when.(
+      los < daycheck & !(o2_support %in% c("Discharged", "Dead")) ~ "prob",
+      los < daycheck &   o2_support %in% c("Discharged", "Dead")  ~ "good",
+      los > daycheck                                              ~ "still in",
+      TRUE                                                        ~ "look"
+    )
+  )
+
+probs <- df |> filter.(!(problem %in% c("still in", "good")))
+lastd <- df |> filter.(hospital_day == "day_28")
+```
+
+``` {r}
+df_outcomes <- fread(here("covflu_combined_deidentified.csv")) |>
+  select.(arb_enc, dead_01)
+
+df <- 
+  df |>
+  left_join.(df_outcomes) |>
+  fill.(dead_01, .by = arb_enc) |>
+  mutate.(
+    o2_support = case_when.(
+      problem == "prob" & dead_01 == 1 ~ "Dead",
+      problem == "prob" & dead_01 == 0 ~ "Discharged",
+      TRUE                          ~ o2_support 
+  )) |>
+  select.(arb_enc, virus, hospital_day, o2_support)
+
+# remove R objects no longer needed
+rm(probs, lastd, df_limits, df_outcomes)
+
+df <- 
+  df |> 
+  mutate.(
+    o2_support = case_when.(
+      is.na(o2_support) ~ "Room Air",
+      TRUE              ~ o2_support
+    ),
+    o2_support = factor(
+      o2_support, 
+      levels = c(
+        "Dead",
+        "Discharged",
+        "IMV",
+        "NIV",
+        "HHFNC",
+        "7-15 LPM",
+        "1-6 LPM",
+        "Room Air"
+      )
+    ),
+    hospital_day = factor(
+      hospital_day,
+      levels = c(
+        "day_1",
+        "day_3",
+        "day_7",
+        "day_14",
+        "day_21",
+        "day_28"
+      ),
+      labels = c(
+        "Day 1",
+        "Day 3",
+        "Day 7",
+        "Day 14",
+        "Day 21",
+        "Day 28"
+      )
+    )
+  ) |>
+  filter.(!is.na(o2_support))
+
+df <-
+  df |>
+  distinct.() |>
+  mutate_across.(
+    .cols = c(arb_enc, virus),
+    .fns  = ~factor(.x)
+  )
+
+df |> fwrite(here(paste0("figures_alluvial_", Sys.Date(), ".csv")))
+```
+
+# Plot paths over time. 
+``` {r 21d-alluvial}
+# plasma_pal <- c("black", viridis::plasma(n = 7, direction = -1))
+plasma_pal <- # lists the colors top to bottom for the alluvial
+  c("#0D0887FF", # dead, darkest purple
+    "#FDC328FF", # discharged, bright yellow
+    "#4C02A1FF", # imv, dark purple
+    "#7E03A8FF", # niv, light purple
+    "#A92395FF", # optiflow, fuscia
+    "#CC4678FF", # midflow, dark pink
+    "#E56B5DFF", # low-flow, light pink
+    "#F89441FF" # room air, orange ("#F48849FF" = light orange)
+  )
+
+# combined 28-day plot, n 
+df |>
+  filter.(hospital_day != "Day 28") |>
+  ggplot(
+    aes(
+      x = factor(hospital_day), 
+      stratum = o2_support, 
+      alluvium = arb_enc,
+      fill = o2_support,
+      label = o2_support
+    )
+  ) + 
+  geom_flow(
+    stat = "alluvium"
+  ) + 
+  geom_stratum(alpha = 0.87) + 
+  theme_bw(base_size = 20) + 
+  theme(legend.position = "bottom") +
+  scale_fill_manual(values = plasma_pal) +
+  scale_y_continuous(breaks = seq(0, 2500, 500)) + 
+  labs(
+    x = "",
+    y = "Number of Patients",
+    fill = ""
+  ) + 
+  facet_wrap(~virus)
+
+ggsave(
+  paste0("facet_alluv_d21_", Sys.Date(), ".pdf"), 
+  device = "pdf", 
+  width  = 16, height = 9, units = "in",
+  path   = here("figs")
+)
+``` 

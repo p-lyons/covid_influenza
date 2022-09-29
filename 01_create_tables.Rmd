@@ -1,0 +1,129 @@
+---
+title: "SARS-CoV-2 vs Influenza: unpack cleaned data, create basic tables"
+author: "Patrick G. Lyons, MD, MSc"
+date: "2022-08-26"
+output:
+  html_document: default
+---
+
+This script unpacks cleaned SARS-CoV-2 and Influenza data, consolidates data to one row per encounter, and creates basic comparative tables.
+
+# Load libraries
+```{r libraries, include = FALSE}
+library(data.table)
+library(tidyverse)
+library(tidytable)
+library(here)
+library(tableone)
+```
+
+# Load cleaned data
+```{r load data}
+df <- fread(here("covflu_combined_deidentified.csv"))
+```
+
+# Drop variables related to multistate models
+## (Code for multistate models is in 03_multistate_models.Rmd)
+```{r}
+df <-
+  df %>%
+  select.(
+    -c(max_o2_12h, hours_in_hosp, hours_12)
+  )
+
+n_distinct.(df$arb_mrn) # 4785
+n_distinct.(df$arb_enc) # 4785
+dim(df) # 57907, 125
+```
+
+# Collapse data to one row per encounter
+```{r}
+df <-
+  df %>%
+  distinct.()
+
+n_distinct.(df$arb_mrn) # 4785 - no patients were completely dropped
+n_distinct.(df$arb_enc) # 4785
+dim(df) # 4785, 125 - one row for every patient encounter
+```
+
+# Create LCA characteristics tables
+```{r characteristics table}
+# characteristics, stratified by virus
+print(
+  tableone::CreateTableOne(
+    vars = c(
+      "age_years", 
+      "female", 
+      "race_nonwhite", 
+      "bmi", 
+      "min_spo2",
+      "min_sbp",
+      "max_pulse", 
+      "max_resp",
+      "min_anc",
+      "max_potassium",
+      "min_sodium",
+      "max_lactate",
+      "min_albumin",
+      "min_hco3",
+      "elix_chf",
+      "elix_arrhythmia",
+      "elix_chronic_pulmonary_disease",
+      "elix_dm_combined",
+      "elix_renal_failure",
+      "elix_metastatic_cancer",
+      "elix_solid_tumor_without_metastasis",
+      "elix_coagulopathy"
+    ),
+    factorVars = c(
+      "female",
+      "race_nonwhite",
+      "elix_chf",
+      "elix_arrhythmia",
+      "elix_chronic_pulmonary_disease",
+      "elix_dm_combined",
+      "elix_renal_failure",
+      "elix_metastatic_cancer",
+      "elix_solid_tumor_without_metastasis",
+      "elix_coagulopathy"
+    ),
+    strata = "virus",
+    data = df
+  ),
+  nonnormal = c(
+    "age_years", "bmi", "min_spo2", "max_pulse", "max_resp",
+    "min_sbp", "min_sodium", "max_lactate",
+    "min_albumin", "min_hco3"
+  ),
+  quote = TRUE, 
+  noSpaces = TRUE
+)
+```
+
+```{r outcomes table}
+# outcomes, stratified by virus
+print(
+  tableone::CreateTableOne(
+    vars = c(
+      "los_hosp_hours", 
+      "los_icu_hours", 
+      "dead_or_hospice", 
+      "icu_enc_01", 
+      "imv_enc_01",
+      "vfd_28"
+    ),
+    factorVars = c(
+      "dead_or_hospice", 
+      "icu_enc_01", 
+      "imv_enc_01"
+    ),
+    strata = "virus",
+    data = df
+  ),
+  nonnormal = c("los_hosp_hours", "los_icu_hours", "vfd_28")
+)
+```
+
+
+

@@ -1,0 +1,274 @@
+---
+title: "SARS-CoV-2 vs Influenza: XGBoost Classifier Model"
+author: "Patrick G. Lyons, MD, MSc"
+output: html_document
+date: "2022-08-26"
+---
+
+This script builds an XGBoost classifer model to predict death/hospice discharge in SARS-CoV-2 and influenza patients.
+
+# Load libraries
+```{r libraries, include = F}
+library(doParallel)
+library(data.table)
+library(tidymodels)
+library(tidytable)
+library(tidyverse)
+library(janitor)
+library(here)
+```
+
+# Multicore processing
+``` {r multicore, include = F}
+all_cores <- parallel::detectCores(logical = FALSE)
+ps_clustr <- parallel::makePSOCKcluster(all_cores-1)
+doParallel::registerDoParallel(ps_clustr)
+```
+
+# Load data
+```{r load data}
+df <- fread(here("covflu_combined_deidentified.csv"))
+```
+
+# Stratify data into two groups based on virus
+```{r stratify data}
+cov <- df %>%
+  filter.(virus == "SARS-CoV-2") %>%
+  select.(-virus)
+
+flu <- df %>%
+  filter.(virus == "Influenza") %>%
+  select.(-virus)
+```
+
+# Build logistic regression model for each virus and calculate AUROC
+```{r logsitic regression}
+# COVID model
+model_c <-
+  glm(
+    dead_or_hospice ~ 
+      age +
+      bmi + 
+      female + 
+      min_albumin +
+      max_ast + 
+      max_o2_flow + 
+      max_anc +
+      max_abs_lymph +
+      min_hcrt +
+      min_sodium +
+      max_resp +
+      min_spo2 +
+      min_platelet,
+    family = "binomial",
+    data   = cov
+  )
+
+# influenza model
+model_f <-
+  glm(
+    dead_or_hospice ~ 
+      age +
+      bmi + 
+      min_albumin +
+      min_hcrt +
+      max_pulse +
+      max_temp +
+      max_rdw +
+      min_platelet,
+    family = "binomial",
+    data   = cov
+  )
+
+# predict death/hospice in COVID patients using COVID model
+prob_cc <- predict(model_c, newdata = cov, type = "response")
+# predict death/hospice in influenza patients using COVID model
+prob_cf <- predict(model_c, newdata = flu, type = "response")
+# predict death/hospice in influenza patients using COVID model
+prob_ff <- predict(model_f, newdata = flu, type = "response")
+# predict death/hospice in COVID patients using influenza model
+prob_fc <- predict(model_f, newdata = cov, type = "response")
+
+# calculate AUROC values
+pROC::auc(pROC::roc(cov$dead_or_hospice, prob_cc))
+pROC::auc(pROC::roc(flu$dead_or_hospice, prob_cf))
+pROC::auc(pROC::roc(flu$dead_or_hospice, prob_ff))
+pROC::auc(pROC::roc(cov$dead_or_hospice, prob_fc))
+```
+
+# XGBoost in split train/test datasets
+```{r recipes}
+# set model specifications
+xgb_spec <- 
+  boost_tree(
+    trees          = 1000, 
+    tree_depth     = tune(), 
+    min_n          = tune(), 
+    loss_reduction = tune(),                     
+    sample_size    = tune(), 
+    mtry           = tune(),         
+    learn_rate     = tune(),                         
+  ) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+# set COVID tuning grid
+xgb_grid_cov <- 
+  grid_max_entropy(
+    tree_depth(),
+    min_n(),
+    loss_reduction(),
+    sample_size = sample_prop(),
+    finalize(mtry(), cov),
+    learn_rate(),
+    size = 60
+  )
+
+# set influenza tuning grid
+xgb_grid_flu <- 
+  grid_max_entropy(
+    tree_depth(),
+    min_n(),
+    loss_reduction(),
+    sample_size = sample_prop(),
+    finalize(mtry(), flu),
+    learn_rate(),
+    size = 60
+  )
+
+xgb_wf <- 
+  workflow() %>%
+  add_formula(dead_or_hospice ~ .) %>%
+  add_model(xgb_spec)
+
+# tuning bootstraps
+cov <- cov %>% mutate.(dead_or_hospice = factor(dead_or_hospice))
+flu <- flu %>% mutate.(dead_or_hospice = factor(dead_or_hospice))
+
+set.seed(5432)
+
+# COVID training/testing split
+cov_split <- initial_split(cov, strata = dead_or_hospice)
+cov_train <- training(cov_split)
+cov_tests <- testing(cov_split)
+
+# influenza training/testing split
+flu_split <- initial_split(flu, strata = dead_or_hospice)
+flu_train <- training(flu_split)
+flu_tests <- testing(flu_split)
+
+set.seed(2345)
+cov_boots <- cov_train %>% bootstraps(50, strata = dead_or_hospice, apparent = TRUE)
+flu_boots <- flu_train %>% bootstraps(50, strata = dead_or_hospice, apparent = TRUE)
+```
+
+# Model tuning
+```{r tuning}
+grid <- 
+  control_grid(
+    allow_par     = TRUE, 
+    parallel_over = "resamples",
+    save_pred     = TRUE
+  )
+
+# save tuned grid for COVID
+tuned_cov <- 
+  tune_grid(
+    xgb_wf,
+    resamples = cov_boots,
+    grid      = xgb_grid_cov,
+    control   = grid
+  )
+
+# save tuned grid for influenza
+tuned_flu <- 
+  tune_grid(
+    xgb_wf,
+    resamples = flu_boots,
+    grid      = xgb_grid_flu,
+    control   = grid
+  )
+
+# save highest performing workflows for each virus
+final_wf_cov <- finalize_workflow(xgb_wf, select_best(tuned_cov, "roc_auc"))
+final_wf_flu <- finalize_workflow(xgb_wf, select_best(tuned_flu, "roc_auc"))
+```
+
+Internal testing
+```{r xgboost interval validation}
+# create new bootstraps for internal validation
+set.seed(123)
+cboots <- cov_train %>% bootstraps(1000, strata = dead_or_hospice, apparent = TRUE)
+fboots <- cov_train %>% bootstraps(1000, strata = dead_or_hospice, apparent = TRUE)
+
+# fit new COVID bootstraps to COVID model
+final_cov <- 
+  fit_resamples(
+    final_wf_cov, 
+    resamples = cboots, 
+    control   = control_resamples(save_pred = T)
+  )
+
+# fit new influenza bootstraps to influenza model
+final_flu <- 
+  fit_resamples(
+    final_wf_flu, 
+    resamples = fboots, 
+    control   = control_resamples(save_pred = T)
+  )
+
+# combine final COVID model with final influenza model
+x <-
+  final_cov %>% mutate.(virus = "SARS-CoV-2") %>%
+  bind_rows.(final_flu %>% mutate.(virus = "Influenza")) %>%
+  nest_by.(virus)
+
+# AUROC, 95% confidence intervals for each virus
+x %>%
+  unnest.(data) %>%
+  unnest.(.metrics) %>%
+  filter.(.metric == "roc_auc") %>%
+  summarize.(
+    auroc_mean = mean(.estimate, na.rm = TRUE),
+    ci_low     = quantile(.estimate, probs = 0.025, na.rm = TRUE),
+    ci_high    = quantile(.estimate, probs = 0.975, na.rm = TRUE),
+    .by        = c(virus)
+  ) 
+```
+
+# Use testing set data on models
+```{r xgboost external validation}
+# create function to fit model and save AUROC
+preds_fn <- function(split, fit) {
+  pred <- predict(fit, new_data = assessment(split), type = "prob")
+  pred %>%
+    bind_cols.(assessment(split)) %>%
+    roc_auc(dead_or_hospice, .pred_0) %>%
+    pull(.estimate)
+}
+
+# fit training data on model
+fit_cov <- fit(final_wf_cov, data = cov_train)
+fit_flu <- fit(final_wf_flu, data = flu_train)
+
+# create 1000 bootstrap samples from testing sets
+cboots2 <- cov_tests %>% bootstraps(1000, strata = dead_or_hospice, apparent = T)
+fboots2 <- flu_tests %>% bootstraps(1000, strata = dead_or_hospice, apparent = T)
+
+# find AUROC and 95% confidence intervals for both models
+cboots2 %>%
+  mutate.(auroc = map_dbl.(splits, preds_fn, fit_cov),) %>%
+  summarize.(
+    auroc_mean  = mean(auroc, na.rm = TRUE),
+    ci_low      = quantile(auroc, probs = 0.025, na.rm = TRUE),
+    ci_high     = quantile(auroc, probs = 0.975, na.rm = TRUE)
+  )
+
+fboots2 %>%
+  mutate.(auroc = map_dbl.(splits, preds_fn, fit_flu),) %>%
+  summarize.(
+    auroc_mean  = mean(auroc, na.rm = TRUE),
+    ci_low      = quantile(auroc, probs = 0.025, na.rm = TRUE),
+    ci_high     = quantile(auroc, probs = 0.975, na.rm = TRUE)
+  )
+```

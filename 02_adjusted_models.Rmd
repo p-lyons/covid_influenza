@@ -1,0 +1,529 @@
+---
+title: "SARS-CoV-2 vs Influenza: Adjusted modeling of outcomes"
+author: "Patrick G. Lyons, MD, MSc"
+output: html_document
+date: "2022-08-26"
+---
+
+This script performs adjusted modeling of outcomes (death/hospice discharge, invasive mechanical ventilation, ventilator free days) in data from patients with SARS-CoV-2 and influenza.
+
+# Load libraries
+```{r libraries, include = FALSE}
+library(data.table)
+library(tidyverse)
+library(tidytable)
+library(here)
+library(tableone)
+```
+
+# Load cleaned data
+```{r load data}
+df <- fread(here("covflu_combined_deidentified.csv"))
+
+# create binary COVID indicator and drop multistate model variables (not needed in this script)
+df <-
+  df %>%
+  mutate.(
+    covid = case_when.(
+      virus == "SARS-CoV-2" ~ 1,
+      virus == "Influenza"  ~ 0,
+      TRUE                  ~ NA_integer_
+    )
+  ) %>%
+  select.(
+    -c(max_o2_12h, hours_in_hosp, hours_12)
+  ) %>%
+  distinct.() # one row per encounter
+```
+
+# Fit a mixed-effects logistic regression to determine the independent relationship between virus and outcomes.
+```{r multilevel model - primary outcome}
+library(lme4)
+
+clustered_model <- 
+  lme4::glmer(
+      dead_or_hospice ~
+      covid + 
+      age_years + 
+      bmi + 
+      race_nonwhite + 
+      female + 
+      elix_chf +
+      elix_arrhythmia +
+      elix_valvular_disease  +
+      elix_pulmonary_circulation_disorders +
+      elix_peripheral_vascular_disorders +  
+      elix_hypertension_combined +
+      elix_paralysis +
+      elix_neuro_other +
+      elix_chronic_pulmonary_disease +
+      elix_dm_combined +
+      elix_hypothyroidism +
+      elix_renal_failure +
+      elix_liver_disease +
+      elix_pud +
+      elix_hiv +
+      elix_lymphoma +
+      elix_metastatic_cancer +
+      elix_solid_tumor_without_metastasis +
+      elix_ra_cvd +
+      elix_coagulopathy +
+      elix_obesity +
+      elix_weight_loss +
+      elix_fluid_and_electrolye_disorders +
+      elix_blood_loss_anemia +
+      elix_deficiency_anemias +
+      elix_alcohol_abuse +
+      elix_drug_abuse +
+      elix_psychoses +
+      elix_depression + 
+      (1 | hospital),
+    family  = binomial,
+    data    = df,
+    control = glmerControl(optimizer = "bobyqa"),
+    nAGQ    = 10
+  )
+
+se <- sqrt(diag(vcov(clustered_model)))
+# table of estimates with 95% CI
+(tab <- 
+    cbind(
+      Est = fixef(clustered_model), 
+      LL = fixef(clustered_model) - 1.96 * se, 
+      UL = fixef(clustered_model) + 1.96 *se
+    )
+)
+
+exp(tab)
+```
+
+```{r multilevel model - ventilator}
+library(lme4)
+
+clustered_model <- 
+  lme4::glmer(
+      imv_enc_01 ~
+      covid + 
+      age + 
+      bmi + 
+      race_nonwhite + 
+      female + 
+      elix_chf +
+      elix_arrhythmia +
+      elix_valvular  +
+      elix_phtn +
+      elix_pvd +  
+      elix_htn +
+      elix_paralysis +
+      elix_neuro_other +
+      elix_pulmonary +
+      elix_dm +
+      elix_d_mcx +
+      elix_hypothyroid +
+      elix_renal +
+      elix_liver +
+      elix_pud +
+      elix_hiv +
+      elix_lymphoma +
+      elix_mets +
+      elix_tumor +
+      elix_rheumatic +
+      elix_coagulopathy +
+      elix_obesity +
+      elix_weight_loss +
+      elix_fluids_lytes +
+      elix_blood_loss +
+      elix_anemia +
+      elix_alcohol +
+      elix_drugs +
+      elix_psychoses +
+      elix_depression + 
+      (1 | hospital),
+    family  = binomial,
+    data    = df,
+    control = glmerControl(optimizer = "bobyqa"),
+    nAGQ    = 10
+  )
+
+se <- sqrt(diag(vcov(clustered_model)))
+# table of estimates with 95% CI
+(tab <- 
+    cbind(
+      Est = fixef(clustered_model), 
+      LL  = fixef(clustered_model) - 1.96 * se, 
+      UL  = fixef(clustered_model) + 1.96 *se
+    )
+)
+
+exp(tab)
+```
+
+# Fine-Gray model adjusted for length of stay
+```{r Fine-Gray model for LOS}
+library(cmprsk)
+
+q <- 
+  df %>%
+  rename.(covid01 = covid) |>
+  mutate.(
+    hospital     = factor(hospital),
+    outcome_surv = case_when.(
+      dead_or_hospice == 1 ~ 0,
+      dead_or_hospice == 0 ~ 1,
+      TRUE                 ~ 2,
+    )
+  ) 
+
+q <- mltools::one_hot(as.data.table(q)) # dummies for FG
+
+x <- 
+  q[,
+    c(
+    "covid01",
+    "hospital_amh",
+    "hospital_bjsph",
+    "hospital_bjwch",
+    "hospital_boone",
+    "hospital_ch",
+    "hospital_mbmc",
+    "hospital_mbsh",
+    "hospital_parkland",
+    "hospital_pwh",
+    "age",
+    "bmi",
+    "female",
+    "race_nonwhite",  
+    "elix_chf",
+    "elix_arrhythmia",
+    "elix_valvular",
+    "elix_phtn",
+    "elix_pvd",  
+    "elix_htn", 
+    "elix_paralysis",
+    "elix_neuro_other",
+    "elix_pulmonary",
+    "elix_dm",
+    "elix_d_mcx", 
+    "elix_hypothyroid",
+    "elix_renal",
+    "elix_liver", 
+    "elix_pud",
+    "elix_hiv",
+    "elix_lymphoma",
+    "elix_mets",
+    "elix_tumor",
+    "elix_rheumatic",
+    "elix_coagulopathy",
+    "elix_obesity",
+    "elix_weight_loss",
+    "elix_fluids_lytes",
+    "elix_blood_loss",
+    "elix_anemia",
+    "elix_alcohol",
+    "elix_drugs",
+    "elix_psychoses",
+    "elix_depression"
+    )
+  ]
+  
+x <- as.matrix(x)
+
+q %>%
+  select_if(is.numeric) %>%
+  cor(use = "complete.obs") %>% 
+  corrplot::corrplot()
+
+null_mod <- 
+  glm(
+    dead_or_hospice ~
+      covid + 
+      hospital_amh +
+      hospital_bjsph +
+      hospital_bjwch +
+      hospital_boone +
+      hospital_ch +
+      hospital_mbmc +
+      hospital_mbsh +
+      hospital_parkland +
+      hospital_pwh +
+      elix_chf +
+      elix_arrhythmia +
+      elix_valvular_disease  +
+      elix_pulmonary_circulation_disorders +
+      elix_peripheral_vascular_disorders +  
+      elix_hypertension_combined +
+      elix_paralysis +
+      elix_neuro_other +
+      elix_chronic_pulmonary_disease +
+      elix_dm_combined +
+      elix_hypothyroidism +
+      elix_renal_failure +
+      elix_liver_disease +
+      elix_pud +
+      elix_hiv +
+      elix_lymphoma +
+      elix_metastatic_cancer +
+      elix_solid_tumor_without_metastasis +
+      elix_ra_cvd +
+      elix_coagulopathy +
+      elix_obesity +
+      elix_weight_loss +
+      elix_fluid_and_electrolye_disorders +
+      elix_blood_loss_anemia +
+      elix_deficiency_anemias +
+      elix_alcohol_abuse +
+      elix_drug_abuse +
+      elix_psychoses +
+      elix_depression,
+    family = "binomial",
+    data   = q
+  )
+
+q_step <- stats::step(null_mod, direction = "backward")
+
+los_fg <- crr(
+  ftime     = q$los_hosp_hours,
+  fstatus   = q$outcome_surv,
+  cov1      = x,
+  na.action = na.omit,
+  failcode  = 1,
+  cencode   = 2,
+  maxiter   = 100
+)
+
+summary(los_fg)
+```
+
+# Negative binomial model for 28-day VFD
+```{r vfd}
+library(pscl)
+library(MASS)
+library(boot)
+library(lmtest)
+
+df <- 
+  df %>%
+  mutate.(vfd_28 = as.integer(vfd_28))
+
+m1 <- zeroinfl(
+  vfd_28 ~ 
+    covid + 
+    hospital +
+    age_years + 
+    bmi + 
+    female + 
+    race_nonwhite + 
+    elix_chf +
+    elix_arrhythmia + 
+    elix_valvular_disease + 
+    elix_pulmonary_circulation_disorders + 
+    elix_peripheral_vascular_disorders + 
+    elix_hypertension_combined +
+    elix_paralysis + 
+    elix_neuro_other + 
+    elix_chronic_pulmonary_disease + 
+    elix_dm_combined +
+    elix_hypothyroidism + 
+    elix_renal_failure + 
+    elix_liver_disease + 
+    elix_pud +
+    elix_hiv + 
+    elix_lymphoma + 
+    elix_metastatic_cancer + 
+    elix_solid_tumor_without_metastasis + 
+    elix_ra_cvd +
+    elix_coagulopathy + 
+    elix_obesity + 
+    elix_weight_loss + 
+    elix_fluid_and_electrolye_disorders +
+    elix_blood_loss_anemia + 
+    elix_deficiency_anemias + 
+    elix_alcohol_abuse + 
+    elix_drug_abuse + 
+    elix_psychoses +
+    elix_depression | 
+    covid + 
+    hospital +
+    age_years + 
+    bmi + 
+    female + 
+    race_nonwhite + 
+    elix_chf +
+    elix_arrhythmia + 
+    elix_valvular_disease + 
+    elix_pulmonary_circulation_disorders + 
+    elix_peripheral_vascular_disorders + 
+    elix_hypertension_combined +
+    elix_paralysis + 
+    elix_neuro_other + 
+    elix_chronic_pulmonary_disease + 
+    elix_dm_combined +
+    elix_hypothyroidism + 
+    elix_renal_failure + 
+    elix_liver_disease + 
+    elix_pud +
+    elix_hiv + 
+    elix_lymphoma + 
+    elix_metastatic_cancer + 
+    elix_solid_tumor_without_metastasis + 
+    elix_ra_cvd +
+    elix_coagulopathy + 
+    elix_obesity + 
+    elix_weight_loss + 
+    elix_fluid_and_electrolye_disorders +
+    elix_blood_loss_anemia + 
+    elix_deficiency_anemias + 
+    elix_alcohol_abuse + 
+    elix_drug_abuse + 
+    elix_psychoses +
+    elix_depression,
+   dist = 'negbin',
+   link = 'logit',
+   data = df
+  )
+# variables after | indicate the logit model predicting excessive zeros
+
+summary(m1)
+
+exp(coef(m1))
+
+# bootstrap CIs
+
+f <- function(data, i) {
+  require(pscl)
+  m <- 
+    zeroinfl(
+        vfd_28 ~ 
+          covid + 
+          hospital +
+          age_years + 
+          bmi + 
+          female + 
+          race_nonwhite + 
+          elix_chf +
+          elix_arrhythmia + 
+          elix_valvular_disease + 
+          elix_pulmonary_circulation_disorders + 
+          elix_peripheral_vascular_disorders + 
+          elix_hypertension_combined +
+          elix_paralysis + 
+          elix_neuro_other + 
+          elix_chronic_pulmonary_disease + 
+          elix_dm_combined +
+          elix_hypothyroidism + 
+          elix_renal_failure + 
+          elix_liver_disease + 
+          elix_pud +
+          elix_hiv + 
+          elix_lymphoma + 
+          elix_metastatic_cancer + 
+          elix_solid_tumor_without_metastasis + 
+          elix_ra_cvd +
+          elix_coagulopathy + 
+          elix_obesity + 
+          elix_weight_loss + 
+          elix_fluid_and_electrolye_disorders +
+          elix_blood_loss_anemia + 
+          elix_deficiency_anemias + 
+          elix_alcohol_abuse + 
+          elix_drug_abuse + 
+          elix_psychoses +
+          elix_depression | 
+          covid + 
+          hospital +
+          age_years + 
+          bmi + 
+          female + 
+          race_nonwhite + 
+          elix_chf +
+          elix_arrhythmia + 
+          elix_valvular_disease + 
+          elix_pulmonary_circulation_disorders + 
+          elix_peripheral_vascular_disorders + 
+          elix_hypertension_combined +
+          elix_paralysis + 
+          elix_neuro_other + 
+          elix_chronic_pulmonary_disease + 
+          elix_dm_combined +
+          elix_hypothyroidism + 
+          elix_renal_failure + 
+          elix_liver_disease + 
+          elix_pud +
+          elix_hiv + 
+          elix_lymphoma + 
+          elix_metastatic_cancer + 
+          elix_solid_tumor_without_metastasis + 
+          elix_ra_cvd +
+          elix_coagulopathy + 
+          elix_obesity + 
+          elix_weight_loss + 
+          elix_fluid_and_electrolye_disorders +
+          elix_blood_loss_anemia + 
+          elix_deficiency_anemias + 
+          elix_alcohol_abuse + 
+          elix_drug_abuse + 
+          elix_psychoses +
+          elix_depression,
+    data  = df[i, ], 
+    dist  = "negbin"
+  )
+  as.vector(t(do.call(rbind, coef(summary(m)))[, 1:2]))
+}
+
+set.seed(10)
+(res <- boot(df, f, R = 10000, parallel = "multicore", ncpus = 7))
+
+## basic parameter estimates with percentile and bias adjusted CIs
+parms <- t(sapply(seq(1, 145, 2), function(i) {
+  out <- boot.ci(res, index = c(i, i + 1), type = c("perc", "bca"))
+  with(out, c(Est = t0, pLL = percent[4], pUL = percent[5],
+    bcaLL = bca[4], bcaUL = bca[5]))
+}))
+
+## add row names
+row.names(parms) <- names(coef(m1))
+## print results
+parms
+
+expparms <- t(sapply(c(1, 3, 5, 7, 9), function(i) {
+  out <- boot.ci(res, index = c(i, i + 1), type = c("perc", "bca"), h = exp)
+  with(out, c(Est = t0, pLL = percent[4], pUL = percent[5],
+    bcaLL = bca[4], bcaUL = bca[5]))
+}))
+
+
+# dispersion statistic
+E2 <- resid(m1, type = "pearson")
+N <- nrow(df)
+p <- length(coef(m1)) + 1 # +1 is due to theta
+sum(E2^2) / (N-p) # 0.825
+
+# compare to null model
+m0 <- update(m1, . ~ 1)
+pchisq(2 * (logLik(m1) - logLik(m0)), df = 3, lower.tail = FALSE) # m1 model is statistically significant
+
+# compare to standard negative binomial regression
+m2 <- MASS::glm.nb(vfd_28 ~ hospital + age_years + bmi + female + race_nonwhite + elix_chf +
+                       elix_arrhythmia + elix_valvular_disease + elix_pulmonary_circulation_disorders +
+                       elix_peripheral_vascular_disorders + elix_hypertension_combined +
+                       elix_paralysis + elix_neuro_other + 
+                       elix_chronic_pulmonary_disease + elix_dm_combined +
+                       elix_hypothyroidism + elix_renal_failure + elix_liver_disease + elix_pud +
+                       elix_hiv + elix_lymphoma + elix_metastatic_cancer + 
+                       elix_solid_tumor_without_metastasis + elix_ra_cvd +
+                       elix_coagulopathy + elix_obesity + elix_weight_loss + 
+                       elix_fluid_and_electrolye_disorders +
+                       elix_blood_loss_anemia + elix_blood_loss_anemia + elix_alcohol_abuse + 
+                       elix_drug_abuse + elix_psychoses + elix_depression + covid, data = df)
+# leave out any of the variables that were after | in the m1 model
+
+summary(m2)
+
+# test to compare zero-inflated neg binom to standard neg binom
+lmtest::lrtest(m1, m2)
+
+#sd = se(sqrt(n)) 
+# 0.0072719*69.17369 // count - 0.5030242
+# ci for count -- -0.0428 to -0.0142
+# exponentiate -- 0.96 / 0.99
+```
